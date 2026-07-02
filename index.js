@@ -5,14 +5,38 @@ const cors = require("cors");
 const Stripe = require("stripe");
 
 const app = express();
-
 app.use(cors());
 app.use(express.json());
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 app.get("/", (req, res) => {
-  res.send("Atlas Bot Stripe server is running");
+  res.json({
+    status: "Atlas Bot Stripe server running",
+    hasStripeKey: !!process.env.STRIPE_SECRET_KEY,
+    keyPrefix: process.env.STRIPE_SECRET_KEY?.slice(0, 7),
+  });
+});
+
+app.get("/debug-stripe", async (req, res) => {
+  try {
+    const balance = await stripe.balance.retrieve();
+
+    res.json({
+      success: true,
+      message: "Stripe connection OK",
+      balance,
+    });
+  } catch (err) {
+    console.error("DEBUG STRIPE ERROR:", err);
+
+    res.status(500).json({
+      success: false,
+      message: err.message,
+      type: err.type,
+      code: err.code,
+    });
+  }
 });
 
 app.post("/create-connect-account", async (req, res) => {
@@ -21,6 +45,7 @@ app.post("/create-connect-account", async (req, res) => {
 
     if (!email) {
       return res.status(400).json({
+        success: false,
         error: "Email is required",
       });
     }
@@ -28,28 +53,27 @@ app.post("/create-connect-account", async (req, res) => {
     const account = await stripe.accounts.create({
       type: "express",
       country: "FR",
-      email: email,
+      email,
     });
 
     const accountLink = await stripe.accountLinks.create({
       account: account.id,
-      refresh_url: "https://atlasbot.app/stripe-refresh",
-      return_url: "https://atlasbot.app/stripe-return",
+      refresh_url: "https://atlas-stripe.onrender.com",
+      return_url: "https://atlas-stripe.onrender.com",
       type: "account_onboarding",
     });
 
-    res.status(200).json({
+    res.json({
       success: true,
       accountId: account.id,
       onboardingUrl: accountLink.url,
     });
-
   } catch (err) {
-    console.error("Stripe Error:", err);
+    console.error("CREATE CONNECT ERROR:", err);
 
     res.status(500).json({
       success: false,
-      error: err.message,
+      message: err.message,
       type: err.type,
       code: err.code,
     });
@@ -58,6 +82,22 @@ app.post("/create-connect-account", async (req, res) => {
 
 const PORT = process.env.PORT || 10000;
 
-app.listen(PORT, () => {
+app.listen(PORT, () => {app.get("/debug-stripe", async (req, res) => {
+  try {
+    const balance = await stripe.balance.retrieve();
+    res.json({
+      success: true,
+      balance,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({
+      success: false,
+      message: err.message,
+      type: err.type,
+      code: err.code,
+    });
+  }
+});
   console.log(`Atlas Bot Stripe server running on port ${PORT}`);
 });
