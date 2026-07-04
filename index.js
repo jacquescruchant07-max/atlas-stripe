@@ -10,6 +10,8 @@ app.use(cors());
 app.use(express.json());
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY.trim());
+console.log("Longueur clé :", process.env.STRIPE_SECRET_KEY.length);
+console.log("Début clé :", JSON.stringify(process.env.STRIPE_SECRET_KEY.slice(0, 15)));
 // Vérification du serveur
 app.get("/", (req, res) => {
   res.json({
