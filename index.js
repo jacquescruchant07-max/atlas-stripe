@@ -9,15 +9,18 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+if (!process.env.STRIPE_SECRET_KEY) {
+  throw new Error("STRIPE_SECRET_KEY is missing");
+}
+
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY.trim());
-console.log("Longueur clé :", process.env.STRIPE_SECRET_KEY.length);
-console.log("Début clé :", JSON.stringify(process.env.STRIPE_SECRET_KEY.slice(0, 15)));
+
 // Vérification du serveur
 app.get("/", (req, res) => {
   res.json({
     status: "Atlas Bot Stripe server running",
-    hasStripeKey: !!process.env.STRIPE_SECRET_KEY,
-    keyPrefix: process.env.STRIPE_SECRET_KEY?.slice(0, 7),
+    hasStripeKey: Boolean(process.env.STRIPE_SECRET_KEY),
+    keyPrefix: process.env.STRIPE_SECRET_KEY.slice(0, 7),
   });
 });
 
@@ -87,6 +90,88 @@ app.post("/create-connect-account", async (req, res) => {
       code: err.code,
     });
   }
+});
+
+// Création d'une session d'abonnement vendeur
+app.post("/create-seller-subscription", async (req, res) => {
+  try {
+    const { email, userId, plan } = req.body;
+
+    if (!email || !userId || !plan) {
+      return res.status(400).json({
+        success: false,
+        error: "email, userId and plan are required",
+      });
+    }
+
+    const priceIds = {
+      starter: process.env.STRIPE_PRICE_STARTER,
+      pro: process.env.STRIPE_PRICE_PRO,
+      business: process.env.STRIPE_PRICE_BUSINESS,
+    };
+
+    const priceId = priceIds[plan];
+
+    if (!priceId) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid plan",
+      });
+    }
+
+    const session = await stripe.checkout.sessions.create({
+      mode: "subscription",
+      customer_email: email,
+      line_items: [
+        {
+          price: priceId,
+          quantity: 1,
+        },
+      ],
+      success_url:
+        "https://atlas-stripe.onrender.com/subscription-success?session_id={CHECKOUT_SESSION_ID}",
+      cancel_url:
+        "https://atlas-stripe.onrender.com/subscription-cancelled",
+      metadata: {
+        userId,
+        plan,
+      },
+      subscription_data: {
+        metadata: {
+          userId,
+          plan,
+        },
+      },
+    });
+
+    res.json({
+      success: true,
+      checkoutUrl: session.url,
+      sessionId: session.id,
+    });
+  } catch (err) {
+    console.error("CREATE SUBSCRIPTION ERROR:", err);
+
+    res.status(500).json({
+      success: false,
+      message: err.message,
+      type: err.type,
+      code: err.code,
+    });
+  }
+});
+
+// Pages temporaires après paiement
+app.get("/subscription-success", (req, res) => {
+  res.send(
+    "<h1>Abonnement activé</h1><p>Vous pouvez retourner dans Atlas Bot.</p>"
+  );
+});
+
+app.get("/subscription-cancelled", (req, res) => {
+  res.send(
+    "<h1>Paiement annulé</h1><p>Aucun abonnement n’a été créé.</p>"
+  );
 });
 
 const PORT = process.env.PORT || 10000;
