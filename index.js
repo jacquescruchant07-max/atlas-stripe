@@ -8,11 +8,23 @@ const admin = require("firebase-admin");
 
 const app = express();
 
+/* ---------------- CONFIGURATION ---------------- */
+
 if (!process.env.STRIPE_SECRET_KEY) {
   throw new Error("STRIPE_SECRET_KEY is missing");
 }
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY.trim());
+
+const MAX_BOTS_BY_PLAN = {
+  starter: 3,
+  pro: 10,
+  business: 9999,
+};
+
+function getMaxBots(plan) {
+  return MAX_BOTS_BY_PLAN[plan] || 0;
+}
 
 /* ---------------- FIREBASE ADMIN ---------------- */
 
@@ -21,8 +33,7 @@ const serviceAccountPath =
 
 if (!fs.existsSync(serviceAccountPath)) {
   throw new Error(
-    "Firebase service account file is missing at " +
-      serviceAccountPath
+    `Firebase service account file is missing at ${serviceAccountPath}`
   );
 }
 
@@ -39,7 +50,7 @@ const db = admin.firestore();
 /* ---------------- STRIPE WEBHOOK ---------------- */
 
 /*
-  Cette route doit rester AVANT express.json().
+  Cette route doit obligatoirement rester avant express.json().
   Stripe a besoin du corps brut pour vérifier la signature.
 */
 app.post(
@@ -47,7 +58,6 @@ app.post(
   express.raw({ type: "application/json" }),
   async (req, res) => {
     const signature = req.headers["stripe-signature"];
-
     let event;
 
     try {
@@ -63,13 +73,14 @@ app.post(
     } catch (err) {
       console.error("WEBHOOK SIGNATURE ERROR:", err.message);
 
-      return res.status(400).send(
-        `Webhook Error: ${err.message}`
-      );
+      return res
+        .status(400)
+        .send(`Webhook Error: ${err.message}`);
     }
 
     try {
       switch (event.type) {
+        /* Paiement initial réussi */
         case "checkout.session.completed": {
           const session = event.data.object;
 
@@ -82,105 +93,154 @@ app.post(
             );
           }
 
+          const normalizedPlan = String(plan)
+            .trim()
+            .toLowerCase();
+
           await db.collection("users").doc(userId).set(
             {
               isSeller: true,
-              sellerPlan: plan,
+              sellerPlan: normalizedPlan,
               subscriptionStatus: "active",
               subscriptionId: session.subscription || "",
               stripeCustomerId: session.customer || "",
+              maxBots: getMaxBots(normalizedPlan),
             },
             { merge: true }
           );
 
           console.log(
-            `Seller subscription activated: ${userId} / ${plan}`
+            `Seller subscription activated: ${userId} / ${normalizedPlan} / maxBots=${getMaxBots(
+              normalizedPlan
+            )}`
           );
 
           break;
         }
 
+        /* Abonnement renouvelé, modifié ou changement de statut */
         case "customer.subscription.updated": {
           const subscription = event.data.object;
 
           const userId = subscription.metadata?.userId;
-          const plan = subscription.metadata?.plan;
+          const rawPlan = subscription.metadata?.plan;
 
-          if (userId) {
-            const activeStatuses = ["active", "trialing"];
-            const isActive = activeStatuses.includes(
-              subscription.status
+          if (!userId) {
+            console.warn(
+              "Subscription updated without userId metadata"
             );
-
-            await db.collection("users").doc(userId).set(
-              {
-                isSeller: isActive,
-                sellerPlan: isActive
-                  ? plan || "unknown"
-                  : "none",
-                subscriptionStatus: isActive
-                  ? "active"
-                  : subscription.status,
-                subscriptionId: subscription.id,
-              },
-              { merge: true }
-            );
+            break;
           }
+
+          const plan = rawPlan
+            ? String(rawPlan).trim().toLowerCase()
+            : "unknown";
+
+          const activeStatuses = ["active", "trialing"];
+          const isActive = activeStatuses.includes(
+            subscription.status
+          );
+
+          await db.collection("users").doc(userId).set(
+            {
+              isSeller: isActive,
+              sellerPlan: isActive ? plan : "none",
+              subscriptionStatus: isActive
+                ? "active"
+                : subscription.status,
+              subscriptionId: subscription.id,
+              stripeCustomerId:
+                typeof subscription.customer === "string"
+                  ? subscription.customer
+                  : "",
+              maxBots: isActive ? getMaxBots(plan) : 0,
+            },
+            { merge: true }
+          );
+
+          console.log(
+            `Seller subscription updated: ${userId} / ${subscription.status}`
+          );
 
           break;
         }
 
+        /* Abonnement définitivement supprimé ou résilié */
         case "customer.subscription.deleted": {
           const subscription = event.data.object;
           const userId = subscription.metadata?.userId;
 
-          if (userId) {
-            await db.collection("users").doc(userId).set(
-              {
-                isSeller: false,
-                sellerPlan: "none",
-                subscriptionStatus: "cancelled",
-                subscriptionId: subscription.id,
-              },
-              { merge: true }
+          if (!userId) {
+            console.warn(
+              "Subscription deleted without userId metadata"
             );
-
-            console.log(
-              `Seller subscription cancelled: ${userId}`
-            );
+            break;
           }
+
+          await db.collection("users").doc(userId).set(
+            {
+              isSeller: false,
+              sellerPlan: "none",
+              subscriptionStatus: "cancelled",
+              subscriptionId: subscription.id,
+              maxBots: 0,
+            },
+            { merge: true }
+          );
+
+          console.log(
+            `Seller subscription cancelled: ${userId}`
+          );
 
           break;
         }
 
+        /* Paiement mensuel échoué */
         case "invoice.payment_failed": {
           const invoice = event.data.object;
           const subscriptionId = invoice.subscription;
 
-          if (subscriptionId) {
-            const subscription =
-              await stripe.subscriptions.retrieve(
-                subscriptionId
-              );
-
-            const userId = subscription.metadata?.userId;
-
-            if (userId) {
-              await db.collection("users").doc(userId).set(
-                {
-                  isSeller: false,
-                  subscriptionStatus: "payment_failed",
-                },
-                { merge: true }
-              );
-            }
+          if (!subscriptionId) {
+            console.warn(
+              "Payment failed without subscriptionId"
+            );
+            break;
           }
+
+          const subscription =
+            await stripe.subscriptions.retrieve(
+              subscriptionId
+            );
+
+          const userId = subscription.metadata?.userId;
+
+          if (!userId) {
+            console.warn(
+              "Payment failed without userId metadata"
+            );
+            break;
+          }
+
+          await db.collection("users").doc(userId).set(
+            {
+              isSeller: false,
+              subscriptionStatus: "payment_failed",
+              maxBots: 0,
+            },
+            { merge: true }
+          );
+
+          console.log(
+            `Seller payment failed: ${userId}`
+          );
 
           break;
         }
 
         default:
-          console.log(`Unhandled Stripe event: ${event.type}`);
+          console.log(
+            `Unhandled Stripe event: ${event.type}`
+          );
       }
 
       return res.json({ received: true });
@@ -195,9 +255,8 @@ app.post(
   }
 );
 
-/*
-  Toutes les autres routes utilisent du JSON normal.
-*/
+/* Toutes les autres routes utilisent du JSON normal. */
+
 app.use(cors());
 app.use(express.json());
 
@@ -207,7 +266,11 @@ app.get("/", (req, res) => {
   res.json({
     status: "Atlas Bot Stripe server running",
     hasStripeKey: Boolean(process.env.STRIPE_SECRET_KEY),
+    hasWebhookSecret: Boolean(
+      process.env.STRIPE_WEBHOOK_SECRET
+    ),
     firebaseConnected: Boolean(admin.apps.length),
+    plans: MAX_BOTS_BY_PLAN,
   });
 });
 
@@ -349,6 +412,8 @@ app.post(
         success: true,
         checkoutUrl: session.url,
         sessionId: session.id,
+        plan: normalizedPlan,
+        maxBots: getMaxBots(normalizedPlan),
       });
     } catch (err) {
       console.error(
