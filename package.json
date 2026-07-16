@@ -1,19 +1,19 @@
 {
   "name": "atlas-stripe",
   "version": "1.0.0",
-  "description": "",
+  "description": "Backend Stripe et Firebase pour Atlas Bot",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node index.js"
   },
-  "keywords": [],
-  "author": "",
+  "author": "Jacques Cruchant",
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "cors": "^2.8.6",
+    "cors": "^2.8.5",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
+    "firebase-admin": "^13.0.0",
     "stripe": "^22.3.0"
   }
 }
